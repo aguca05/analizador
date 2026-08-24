@@ -179,6 +179,11 @@ select.mini{padding:4px 6px;font-size:.8rem;width:auto}
   </div>
 
   <div class="panel">
+    <h2>💥 Liquidaciones en vivo</h2>
+    <div id="liqs"><span style="color:var(--muted);font-size:.85rem">Conectando al stream de Binance…</span></div>
+  </div>
+
+  <div class="panel">
     <h2>🕯 Patrones detectados</h2>
     <div id="patterns"></div>
   </div>
@@ -215,12 +220,12 @@ select.mini{padding:4px 6px;font-size:.8rem;width:auto}
 const BASE='https://fapi.binance.com';
 const SYMBOLS=[
   {s:'BTCUSDT',n:'BTC'},{s:'ETHUSDT',n:'ETH'},{s:'SOLUSDT',n:'SOL'},{s:'DOGEUSDT',n:'DOGE'},
-  {s:'XRPUSDT',n:'XRP'},{s:'BNBUSDT',n:'BNB'},{s:'AVAXUSDT',n:'AVAX'}
+  {s:'XRPUSDT',n:'XRP'}
 ];
 const TFS=['15m','1h','4h','1d'];
-const TF_WEIGHT={'15m':1,'1h':2,'4h':3,'1d':2};
+const TF_WEIGHT={'15m':2,'1h':3,'4h':2,'1d':1};
 const LSK={cfg:'futApp',trades:'futTrades',verd:'futVerdicts'};
-let state={symbol:'BTCUSDT',chartTF:'1h',data:null,plan:null,levels:null,analysis:null,prices:{},quick:{},news:[]};
+let state={symbol:'BTCUSDT',chartTF:'1h',data:null,plan:null,levels:null,analysis:null,prices:{},quick:{},news:[],liqs:[]};
 let trades=[];
 
 /* ---------- utilidades ---------- */
@@ -406,41 +411,54 @@ function analyze(d){
 
 /* ---------- plan de trade ---------- */
 function buildPlan(d,an){
-  const cs1h=d.candles['1h'],cs4h=d.candles['4h'];
+  const cs1h=d.candles['1h'],cs4h=d.candles['4h'],cs1d=d.candles['1d'];
   const px=cs1h[cs1h.length-1].c;
   const a=atr(cs1h);const atr1h=a[a.length-1];
+  // Rango diario esperado (ATR 1D) y cuánto ya se consumió hoy
+  let atrD=atr1h*8;
+  if(cs1d&&cs1d.length>20){const ad=atr(cs1d);atrD=ad[ad.length-1];}
+  let dayUsed=0;
+  if(cs1d&&cs1d.length){const dc=cs1d[cs1d.length-1];dayUsed=(dc.h-dc.l)/atrD*100;}
   const pv1=pivots(cs1h.slice(-150)),pv4=pivots(cs4h.slice(-150));
   const tol=px*0.004;
   const resAll=cluster([...pv1.hi,...pv4.hi],tol).filter(x=>x.level>px*1.001).sort((x,y)=>x.level-y.level);
   const supAll=cluster([...pv1.lo,...pv4.lo],tol).filter(x=>x.level<px*0.999).sort((x,y)=>y.level-x.level);
-  const nearSup=supAll[0]?supAll[0].level:px-2*atr1h;
-  const nearRes=resAll[0]?resAll[0].level:px+2*atr1h;
+  // Para objetivos intradía usamos solo niveles de 1h (los de 4h son contexto)
+  const res1h=cluster(pv1.hi,tol).filter(x=>x.level>px*1.001).sort((x,y)=>x.level-y.level);
+  const sup1h=cluster(pv1.lo,tol).filter(x=>x.level<px*0.999).sort((x,y)=>y.level-x.level);
+  const nearSup=sup1h[0]?sup1h[0].level:px-1.5*atr1h;
+  const nearRes=res1h[0]?res1h[0].level:px+1.5*atr1h;
   const closes1h=cs1h.map(x=>x.c);
   const e20a=ema(closes1h,20);const e20v=e20a[e20a.length-1];
   let plan=null;
   if(an.cls==='long'){
-    // Entrada ideal: retroceso a EMA20 1h o al soporte más cercano (el más alto de los dos)
     const cand=[];
     if(e20v<px*0.999)cand.push(e20v);
     if(nearSup<px*0.999)cand.push(nearSup+0.2*atr1h);
-    let entry=cand.length?Math.max(...cand):px-0.5*atr1h;
-    entry=Math.max(entry,px-1.5*atr1h);
+    let entry=cand.length?Math.max(...cand):px-0.4*atr1h;
+    entry=Math.max(entry,px-0.8*atr1h);
     if(entry>px)entry=px;
-    const sl=Math.min(entry-1.3*atr1h,nearSup-0.3*atr1h);
+    let sl=Math.min(entry-1.0*atr1h,nearSup-0.25*atr1h);
+    if(entry-sl>1.5*atr1h)sl=entry-1.5*atr1h;
     const risk=entry-sl;
-    plan={dir:'LONG',entry,market:px,sl,tp1:entry+1.2*risk,tp2:entry+2*risk,risk};
+    const tp1=entry+1.0*risk;
+    const tp2=Math.max(tp1+0.15*risk,Math.min(entry+1.8*risk,entry+0.65*atrD));
+    plan={dir:'LONG',entry,market:px,sl,tp1,tp2,risk};
   }else if(an.cls==='short'){
     const cand=[];
     if(e20v>px*1.001)cand.push(e20v);
     if(nearRes>px*1.001)cand.push(nearRes-0.2*atr1h);
-    let entry=cand.length?Math.min(...cand):px+0.5*atr1h;
-    entry=Math.min(entry,px+1.5*atr1h);
+    let entry=cand.length?Math.min(...cand):px+0.4*atr1h;
+    entry=Math.min(entry,px+0.8*atr1h);
     if(entry<px)entry=px;
-    const sl=Math.max(entry+1.3*atr1h,nearRes+0.3*atr1h);
+    let sl=Math.max(entry+1.0*atr1h,nearRes+0.25*atr1h);
+    if(sl-entry>1.5*atr1h)sl=entry+1.5*atr1h;
     const risk=sl-entry;
-    plan={dir:'SHORT',entry,market:px,sl,tp1:entry-1.2*risk,tp2:entry-2*risk,risk};
+    const tp1=entry-1.0*risk;
+    const tp2=Math.min(tp1-0.15*risk,Math.max(entry-1.8*risk,entry-0.65*atrD));
+    plan={dir:'SHORT',entry,market:px,sl,tp1,tp2,risk};
   }
-  return{plan,px,atr1h,supports:supAll.slice(0,4),resistances:resAll.slice(0,4)};}
+  return{plan,px,atr1h,atrD,dayUsed,supports:supAll.slice(0,4),resistances:resAll.slice(0,4)};}
 
 /* ---------- alertas visuales ---------- */
 function showAlert(msg,cls){
@@ -532,6 +550,10 @@ function autoTrack(){
       if(px>=t.sl){t.status='cerrada';t.exit=t.sl;t.note=(t.note?t.note+' · ':'')+'SL automático';changed=true;continue;}
       if(t.tp1&&px<=t.tp1&&!t.hits.tp1){t.hits.tp1=true;changed=true;showAlert('🎯 '+t.sym.replace('USDT','')+' '+t.dir+' alcanzó TP1 — cierra 50% y mueve SL a tu entrada','short');}
       if(t.tp2&&px<=t.tp2&&!t.hits.tp2){t.hits.tp2=true;t.status='cerrada';t.exit=t.tp2;t.note=(t.note?t.note+' · ':'')+'TP2 automático';changed=true;showAlert('🏁 '+t.sym.replace('USDT','')+' '+t.dir+' alcanzó TP2 — trade completado','short');}
+    }
+    if(t.status==='abierta'&&!t.warn10&&Date.now()-t.ts>10*3600000){
+      t.warn10=true;changed=true;
+      showAlert('⏰ '+t.sym.replace('USDT','')+' '+t.dir+' lleva más de 10 h abierta — el modo intradía sugiere cerrarla hoy (breakeven o mercado)','');
     }
   }
   if(changed)jSave();
@@ -693,7 +715,11 @@ function renderPlan(bp,an){
     '<div class="plan-row"><span class="k">🎯 TP1 (cerrar 50%, SL a BE)</span><span class="v" style="color:var(--green)">$'+fmtP(p.tp1)+'</span></div>'+
     '<div class="plan-row"><span class="k">🎯 TP2 (cerrar el resto)</span><span class="v" style="color:var(--green)">$'+fmtP(p.tp2)+'</span></div>'+
     '<div class="plan-row"><span class="k">Riesgo/Beneficio (TP2)</span><span class="v">1:'+rr2+'</span></div>'+
-    '<div class="plan-row"><span class="k">ATR 1h (volatilidad)</span><span class="v">$'+fmtP(bp.atr1h)+'</span></div>';
+    '<div class="plan-row"><span class="k">ATR 1h (volatilidad)</span><span class="v">$'+fmtP(bp.atr1h)+'</span></div>'+
+    '<div class="plan-row"><span class="k">Rango diario esperado (ATR 1D)</span><span class="v">$'+fmtP(bp.atrD)+'</span></div>'+
+    '<div class="plan-row"><span class="k">Rango del día ya usado</span><span class="v" style="color:'+(bp.dayUsed>85?'var(--red)':bp.dayUsed>60?'var(--yellow)':'var(--green)')+'">'+bp.dayUsed.toFixed(0)+'%</span></div>'+
+    (bp.dayUsed>85?'<div style="font-size:.75rem;color:var(--red);padding-top:6px">⚠️ El día ya consumió su rango típico: los targets son menos probables hoy. Considera esperar la próxima sesión.</div>':'')+
+    '<div style="font-size:.75rem;color:var(--muted);padding-top:8px">🕐 Modo intradía: TP1 y TP2 están calculados dentro del rango diario esperado. Si TP1 no llega en 6–8 horas, cierra a breakeven o a mercado — no dejes el trade abierto de un día para otro.</div>';
   btns.innerHTML='<button class="btn primary" onclick="jTake()">✅ Tomé esta entrada</button><button class="btn" onclick="copyPlan()">📋 Copiar niveles</button>';
   renderCalc(p);}
 function renderCalc(p){
@@ -730,6 +756,11 @@ function renderDeriv(d,an){
   if(dv.oiChg!==undefined)items.push(['Open Interest 24h',fmtPct(dv.oiChg,1),dv.oiChg>0?'var(--green)':'var(--red)']);
   if(dv.lsRatio!==undefined)items.push(['Ratio Long/Short',dv.lsRatio.toFixed(2),'var(--text)']);
   if(dv.taker!==undefined)items.push(['Taker Buy/Sell',dv.taker.toFixed(2),dv.taker>1?'var(--green)':'var(--red)']);
+  if(d.prem&&d.prem.nextFundingTime){
+    const ms=d.prem.nextFundingTime-Date.now();
+    if(ms>0){const h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000);
+      items.push(['Próximo funding',h+'h '+m+'m',ms<1800000?'var(--yellow)':'var(--text)']);}
+  }
   if(t){items.push(['Cambio 24h',fmtPct(parseFloat(t.priceChangePercent)),parseFloat(t.priceChangePercent)>=0?'var(--green)':'var(--red)']);
     items.push(['Volumen 24h','$'+(parseFloat(t.quoteVolume)/1e6).toFixed(0)+'M','var(--text)']);
     items.push(['Máx 24h','$'+fmtP(parseFloat(t.highPrice)),'var(--muted)']);
@@ -800,6 +831,35 @@ function drawChart(){
   }
   ctx.fillStyle='#4f8cff';ctx.fillText('EMA20',mL+4,14);
   ctx.fillStyle='#f0b90b';ctx.fillText('EMA50',mL+48,14);}
+
+/* ---------- liquidaciones en vivo (WebSocket) ---------- */
+function connectLiqs(){
+  try{
+    const ws=new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr');
+    ws.onmessage=e=>{
+      try{
+        const o=JSON.parse(e.data).o;
+        if(!SYMBOLS.some(s=>s.s===o.s))return;
+        const val=parseFloat(o.q)*parseFloat(o.ap);
+        state.liqs.unshift({sym:o.s,side:o.S,val,price:parseFloat(o.ap),ts:Date.now()});
+        state.liqs=state.liqs.slice(0,30);
+        if(val>250000&&o.s===state.symbol)
+          showAlert('💥 Liquidación grande en '+o.s.replace('USDT','')+': $'+(val/1000).toFixed(0)+'k '+(o.S==='SELL'?'(longs liquidados — presión bajista)':'(shorts liquidados — presión alcista)'),o.S==='SELL'?'short':'long');
+        renderLiqs();
+      }catch(err){}
+    };
+    ws.onclose=()=>setTimeout(connectLiqs,5000);
+    ws.onerror=()=>{try{ws.close();}catch(err){}};
+  }catch(e){}}
+function renderLiqs(){
+  const box=el('liqs');if(!box)return;
+  const rel=state.liqs.filter(l=>l.val>20000).slice(0,8);
+  box.innerHTML=rel.length?rel.map(l=>{
+    const mins=Math.round((Date.now()-l.ts)/60000);
+    const isLong=l.side==='SELL';
+    return '<div class="plan-row"><span class="k"><b>'+l.sym.replace('USDT','')+'</b> '+(isLong?'<span class="short">longs liquidados ↓</span>':'<span class="long">shorts liquidados ↑</span>')+'</span>'+
+      '<span class="v" style="color:'+(isLong?'var(--red)':'var(--green)')+'">$'+(l.val/1000).toFixed(0)+'k <span style="color:var(--muted);font-weight:400">· hace '+mins+'m</span></span></div>';
+  }).join(''):'<span style="color:var(--muted);font-size:.85rem">Sin liquidaciones relevantes (&gt;$20k) recientes en tus pares. Una racha de liquidaciones del mismo lado suele anticipar un movimiento fuerte en la dirección contraria a los liquidados.</span>';}
 
 /* ---------- noticias y F&G ---------- */
 const POS_W=['surge','rally','soar','jump','bullish','approval','adoption','record','high','gain','etf inflow','breakout','partnership','upgrade'];
@@ -879,7 +939,7 @@ function init(){
   trades=lsGet(LSK.trades,[]);
   renderJournal();renderStrip();
   refresh();
-  loadNews();loadFNG();
+  loadNews();loadFNG();connectLiqs();
   setTimeout(quickScan,4000);
   setInterval(refresh,30000);
   setInterval(quickScan,120000);
