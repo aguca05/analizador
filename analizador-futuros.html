@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Analizador Futuros — Binance</title>
-<!-- v2.0 -->
+<!-- v3.1 -->
 <style>
 :root{
   --bg:#0b0e14; --panel:#131722; --panel2:#1a2030; --border:#232a3b;
@@ -225,7 +225,7 @@ const SYMBOLS=[
 const TFS=['15m','1h','4h','1d'];
 const TF_WEIGHT={'15m':2,'1h':3,'4h':2,'1d':1};
 const LSK={cfg:'futApp',trades:'futTrades',verd:'futVerdicts'};
-let state={symbol:'BTCUSDT',chartTF:'1h',data:null,plan:null,levels:null,analysis:null,prices:{},quick:{},news:[],liqs:[]};
+let state={symbol:'BTCUSDT',chartTF:'1h',data:null,plan:null,levels:null,analysis:null,prices:{},quick:{},news:[],liqs:[],liqWs:''};
 let trades=[];
 
 /* ---------- utilidades ---------- */
@@ -508,10 +508,17 @@ function jTake(){
   const p=state.plan&&state.plan.plan;if(!p){toast('No hay plan activo');return;}
   const cap=parseFloat(el('capital').value)||0,rp=parseFloat(el('riskPct').value)||1;
   const qty=cap>0?+(cap*rp/100/p.risk).toFixed(6):0;
+  const pend=Math.abs(p.entry-p.market)/p.market>0.0005;
   trades.unshift({id:Date.now(),sym:state.symbol,dir:p.dir,entry:p.entry,sl:p.sl,tp1:p.tp1,tp2:p.tp2,
-    qty,ts:Date.now(),status:'abierta',exit:null,note:'',hits:{}});
+    qty,ts:Date.now(),status:pend?'pendiente':'abierta',exit:null,note:'',hits:{}});
   jSave();renderJournal();renderStrip();
-  toast('✅ Trade registrado — seguimiento activo');}
+  toast(pend?'⏳ Orden límite registrada — se activará solo si el precio llega a '+fmtP(p.entry):'✅ Trade registrado — seguimiento activo');}
+function jFill(id){const t=jFind(id);if(!t||t.status!=='pendiente')return;
+  t.status='abierta';t.ts=Date.now();t.note=(t.note?t.note+' · ':'')+'llenada manual';
+  jSave();renderJournal();renderStrip();}
+function jCancel(id){const t=jFind(id);if(!t||t.status!=='pendiente')return;
+  t.status='cancelada';t.note=(t.note?t.note+' · ':'')+'cancelada manual';
+  jSave();renderJournal();renderStrip();}
 function jAddManual(){
   trades.unshift({id:Date.now(),sym:state.symbol,dir:'LONG',entry:0,sl:0,tp1:0,tp2:0,
     qty:0,ts:Date.now(),status:'abierta',exit:null,note:'',hits:{},editing:true});
@@ -527,7 +534,7 @@ function jSaveRow(id){
   t.note=g('note')||'';
   t.status=g('status')||t.status;
   if(t.status==='cerrada'&&t.exit===null)t.exit=state.prices[t.sym]||t.entry;
-  if(t.status==='abierta')t.exit=null;
+  if(t.status==='abierta'||t.status==='pendiente'||t.status==='cancelada')t.exit=null;
   delete t.editing;
   jSave();renderJournal();renderStrip();}
 function jClose(id,mode){
@@ -540,8 +547,25 @@ function jClose(id,mode){
 function autoTrack(){
   let changed=false;
   for(const t of trades){
-    if(t.status!=='abierta'||t.editing||!(tradeRisk(t)>0))continue;
+    if(t.editing||!(tradeRisk(t)>0))continue;
     const px=state.prices[t.sym];if(!px)continue;
+    if(t.status==='pendiente'){
+      const filled=t.dir==='LONG'?px<=t.entry:px>=t.entry;
+      const invalid=t.dir==='LONG'?(t.tp1&&px>=t.tp1):(t.tp1&&px<=t.tp1);
+      if(filled){
+        t.status='abierta';t.ts=Date.now();t.note=(t.note?t.note+' · ':'')+'orden llenada';changed=true;
+        showAlert('✅ '+t.sym.replace('USDT','')+' '+t.dir+': orden límite llenada en '+fmtP(t.entry)+' — trade activo',t.dir==='LONG'?'long':'short');
+        if(t.dir==='LONG'?px<=t.sl:px>=t.sl){t.status='cerrada';t.exit=t.sl;t.note+=' · SL automático';}
+      }else if(invalid){
+        t.status='cancelada';t.note=(t.note?t.note+' · ':'')+'el precio alcanzó TP1 sin retroceder a la entrada';changed=true;
+        showAlert('🚫 '+t.sym.replace('USDT','')+' '+t.dir+': orden cancelada — el precio se fue sin llenarte. No cuenta como trade.','');
+      }else if(Date.now()-t.ts>8*3600000){
+        t.status='cancelada';t.note=(t.note?t.note+' · ':'')+'expiró sin llenarse (8h)';changed=true;
+        showAlert('⌛ '+t.sym.replace('USDT','')+': la orden límite expiró sin llenarse — cancelada','');
+      }
+      continue;
+    }
+    if(t.status!=='abierta')continue;
     if(t.dir==='LONG'){
       if(px<=t.sl){t.status='cerrada';t.exit=t.sl;t.note=(t.note?t.note+' · ':'')+'SL automático';changed=true;continue;}
       if(t.tp1&&px>=t.tp1&&!t.hits.tp1){t.hits.tp1=true;changed=true;showAlert('🎯 '+t.sym.replace('USDT','')+' '+t.dir+' alcanzó TP1 — cierra 50% y mueve SL a tu entrada','long');}
@@ -560,17 +584,21 @@ function autoTrack(){
   renderJournal();renderStrip();}
 function renderStrip(){
   const s=el('trackStrip');
-  const open=trades.filter(t=>t.status==='abierta'&&!t.editing);
+  const open=trades.filter(t=>(t.status==='abierta'||t.status==='pendiente')&&!t.editing);
   s.innerHTML=open.map(t=>{
     const px=state.prices[t.sym];
-    let info='—';let col='var(--muted)';
-    if(px&&tradeRisk(t)>0){
+    let ico='📌',info='—',col='var(--muted)';
+    if(t.status==='pendiente'){
+      ico='⏳';
+      if(px){const dist=(t.entry-px)/px*100;info='límite @ '+fmtP(t.entry)+' ('+fmtPct(dist,2)+')';col='var(--blue)';}
+      else info='límite @ '+fmtP(t.entry);
+    }else if(px&&tradeRisk(t)>0){
       const pnl=tradePnlPct(t,px),r=tradeR(t,px);
       col=pnl>=0?'var(--green)':'var(--red)';
       info=fmtPct(pnl)+' ('+(r>=0?'+':'')+r.toFixed(2)+'R)';
     }
     return '<div class="trade-chip" onclick="document.getElementById(\'jTable\').scrollIntoView({behavior:\'smooth\'})">'+
-      '📌 <b>'+esc(t.sym.replace('USDT',''))+'</b> '+
+      ico+' <b>'+esc(t.sym.replace('USDT',''))+'</b> '+
       '<span class="'+(t.dir==='LONG'?'long':'short')+'">'+t.dir+'</span>'+
       '<span style="color:'+col+';font-weight:700">'+info+'</span></div>';
   }).join('');}
@@ -581,6 +609,7 @@ function renderJournal(){
   el('jStats').innerHTML=
     '<div class="stat"><div class="lbl">Total</div><div class="val">'+trades.length+'</div></div>'+
     '<div class="stat"><div class="lbl">Abiertas</div><div class="val">'+trades.filter(t=>t.status==='abierta').length+'</div></div>'+
+    '<div class="stat"><div class="lbl">Pendientes</div><div class="val" style="color:var(--blue)">'+trades.filter(t=>t.status==='pendiente').length+'</div></div>'+
     '<div class="stat"><div class="lbl">Ganadas</div><div class="val long">'+wins.length+'</div></div>'+
     '<div class="stat"><div class="lbl">Perdidas</div><div class="val short">'+(closed.length-wins.length)+'</div></div>'+
     '<div class="stat"><div class="lbl">Win rate</div><div class="val">'+(closed.length?Math.round(wins.length/closed.length*100)+'%':'—')+'</div></div>'+
@@ -597,7 +626,7 @@ function renderJournal(){
         '<td><select class="mini" id="ed-dir-'+t.id+'"><option'+(t.dir==='LONG'?' selected':'')+'>LONG</option><option'+(t.dir==='SHORT'?' selected':'')+'>SHORT</option></select></td>'+
         '<td>'+inp('entry',t.entry)+'</td><td>'+inp('sl',t.sl)+'</td>'+
         '<td>'+inp('tp1',t.tp1)+'</td><td>'+inp('tp2',t.tp2)+'</td>'+
-        '<td><select class="mini" id="ed-status-'+t.id+'"><option value="abierta"'+(t.status==='abierta'?' selected':'')+'>abierta</option><option value="cerrada"'+(t.status==='cerrada'?' selected':'')+'>cerrada</option></select>'+
+        '<td><select class="mini" id="ed-status-'+t.id+'"><option value="pendiente"'+(t.status==='pendiente'?' selected':'')+'>pendiente</option><option value="abierta"'+(t.status==='abierta'?' selected':'')+'>abierta</option><option value="cerrada"'+(t.status==='cerrada'?' selected':'')+'>cerrada</option><option value="cancelada"'+(t.status==='cancelada'?' selected':'')+'>cancelada</option></select>'+
         '<div style="margin-top:4px">Salida: '+inp('exit',t.exit===null?'':t.exit)+'</div>'+
         '<div style="margin-top:4px">Cant: '+inp('qty',t.qty)+'</div></td>'+
         '<td>—</td>'+
@@ -607,7 +636,10 @@ function renderJournal(){
     const dirCls=t.dir==='LONG'?'long':'short';
     let pnlCell='—';
     if(tradeRisk(t)>0){
-      if(t.status==='abierta'){
+      if(t.status==='pendiente'){
+        const px=state.prices[t.sym];
+        if(px)pnlCell='<span style="color:var(--blue);font-size:.78rem">falta '+fmtPct((t.entry-px)/px*100,2)+'<br>para llenar</span>';
+      }else if(t.status==='abierta'){
         const px=state.prices[t.sym];
         if(px){const pnl=tradePnlPct(t,px),r=tradeR(t,px);
           pnlCell='<span style="color:'+(pnl>=0?'var(--green)':'var(--red)')+';font-weight:700">'+fmtPct(pnl)+'<br>'+(r>=0?'+':'')+r.toFixed(2)+'R</span>';}
@@ -616,9 +648,14 @@ function renderJournal(){
         pnlCell='<span style="color:'+(r>0?'var(--green)':'var(--red)')+';font-weight:700">'+(r>=0?'+':'')+r.toFixed(2)+'R<br>'+(r>0?'✅ Ganado':'❌ Perdido')+'</span>';}
     }
     const hits=['tp1','tp2'].filter(k=>t.hits&&t.hits[k]).map(k=>'<span class="hitbadge">'+k.toUpperCase()+' ✓</span>').join('');
-    const stateCell=(t.status==='abierta'?'<span class="neutral">● Abierta</span>':'<span style="color:var(--muted)">○ Cerrada'+(t.exit!==null?' @ '+fmtP(t.exit):'')+'</span>')+hits;
+    const stateCell=(t.status==='abierta'?'<span class="neutral">● Abierta</span>'
+      :t.status==='pendiente'?'<span style="color:var(--blue)">⏳ Pendiente</span>'
+      :t.status==='cancelada'?'<span style="color:var(--muted)">✖ Cancelada</span>'
+      :'<span style="color:var(--muted)">○ Cerrada'+(t.exit!==null?' @ '+fmtP(t.exit):'')+'</span>')+hits;
     const actions=t.status==='abierta'
       ?'<button class="btn sm green" onclick="jClose('+t.id+',\'tp1\')">TP1</button> <button class="btn sm green" onclick="jClose('+t.id+',\'tp2\')">TP2</button> <button class="btn sm red" onclick="jClose('+t.id+',\'sl\')">SL</button> <button class="btn sm" onclick="jClose('+t.id+',\'mkt\')">Cerrar ya</button> <button class="btn sm" onclick="jEdit('+t.id+')">✏️</button> <button class="btn sm red" onclick="jDel('+t.id+')">🗑</button>'
+      :t.status==='pendiente'
+      ?'<button class="btn sm green" onclick="jFill('+t.id+')">Se llenó</button> <button class="btn sm red" onclick="jCancel('+t.id+')">Cancelar</button> <button class="btn sm" onclick="jEdit('+t.id+')">✏️</button> <button class="btn sm red" onclick="jDel('+t.id+')">🗑</button>'
       :'<button class="btn sm" onclick="jEdit('+t.id+')">✏️</button> <button class="btn sm red" onclick="jDel('+t.id+')">🗑</button>';
     return '<tr><td style="white-space:nowrap">'+date+'</td><td><b>'+esc(t.sym.replace('USDT',''))+'</b></td>'+
       '<td class="'+dirCls+'"><b>'+t.dir+'</b></td>'+
@@ -734,11 +771,19 @@ function renderCalc(p){
   const margin=notional/lev;
   const liqWarn=margin>cap*0.6?'<div class="err" style="margin-top:8px">⚠️ El margen requerido supera el 60% de tu capital: reduce tamaño o apalancamiento.</div>':'';
   const rpWarn=rp>2?'<div class="err" style="margin-top:8px">⚠️ Riesgo &gt;2% por operación: por encima de lo recomendado (0.5–2%).</div>':'';
+  const x2=(p.dir==='LONG'?p.tp2-p.entry:p.entry-p.tp2)/p.risk;
+  const g1=0.5*riskUSD;
+  const gTot=0.5*riskUSD+0.5*riskUSD*x2;
   b.innerHTML=
     '<div class="plan-row"><span class="k">Riesgo máximo</span><span class="v">$'+riskUSD.toFixed(2)+'</span></div>'+
     '<div class="plan-row"><span class="k">Tamaño de posición</span><span class="v">'+qty.toFixed(4)+' '+state.symbol.replace('USDT','')+'</span></div>'+
     '<div class="plan-row"><span class="k">Valor nocional</span><span class="v">$'+notional.toFixed(2)+'</span></div>'+
-    '<div class="plan-row"><span class="k">Margen ('+lev+'x)</span><span class="v">$'+margin.toFixed(2)+'</span></div>'+liqWarn+rpWarn;}
+    '<div class="plan-row"><span class="k">Margen ('+lev+'x)</span><span class="v">$'+margin.toFixed(2)+'</span></div>'+
+    '<div class="plan-row"><span class="k">🛑 Pérdida si toca SL</span><span class="v" style="color:var(--red)">-$'+riskUSD.toFixed(2)+'</span></div>'+
+    '<div class="plan-row"><span class="k">💵 Ganancia en TP1 (cierras 50%)</span><span class="v" style="color:var(--green)">+$'+g1.toFixed(2)+'</span></div>'+
+    '<div class="plan-row"><span class="k">💵 Ganancia total (TP1 + TP2)</span><span class="v" style="color:var(--green)">+$'+gTot.toFixed(2)+'</span></div>'+
+    '<div style="font-size:.72rem;color:var(--muted);padding-top:6px">Al tocar TP1 aseguras +$'+g1.toFixed(2)+' y mueves el SL a tu entrada: desde ahí el trade ya no puede perder.</div>'+
+    liqWarn+rpWarn;}
 function renderTFTable(an){
   const tb=el('tfTable').querySelector('tbody');
   tb.innerHTML=TFS.map(tf=>{
@@ -833,33 +878,51 @@ function drawChart(){
   ctx.fillStyle='#f0b90b';ctx.fillText('EMA50',mL+48,14);}
 
 /* ---------- liquidaciones en vivo (WebSocket) ---------- */
+function fmtUsd(v){return v>=1e6?(v/1e6).toFixed(2)+'M':v>=1000?(v/1000).toFixed(1)+'k':v.toFixed(0);}
 function connectLiqs(){
   try{
+    state.liqWs='conectando';renderLiqs();
     const ws=new WebSocket('wss://fstream.binance.com/ws/!forceOrder@arr');
+    ws.onopen=()=>{state.liqWs='ok';renderLiqs();};
     ws.onmessage=e=>{
       try{
-        const o=JSON.parse(e.data).o;
-        if(!SYMBOLS.some(s=>s.s===o.s))return;
-        const val=parseFloat(o.q)*parseFloat(o.ap);
-        state.liqs.unshift({sym:o.s,side:o.S,val,price:parseFloat(o.ap),ts:Date.now()});
-        state.liqs=state.liqs.slice(0,30);
-        if(val>250000&&o.s===state.symbol)
-          showAlert('💥 Liquidación grande en '+o.s.replace('USDT','')+': $'+(val/1000).toFixed(0)+'k '+(o.S==='SELL'?'(longs liquidados — presión bajista)':'(shorts liquidados — presión alcista)'),o.S==='SELL'?'short':'long');
+        const msg=JSON.parse(e.data);
+        const evs=Array.isArray(msg)?msg:[msg];
+        for(const ev of evs){
+          const o=ev&&ev.o?ev.o:(ev&&ev.data&&ev.data.o?ev.data.o:null);
+          if(!o||!o.s||!SYMBOLS.some(s=>s.s===o.s))continue;
+          const val=parseFloat(o.q)*parseFloat(o.ap);
+          if(!isFinite(val))continue;
+          state.liqs.unshift({sym:o.s,side:o.S,val,price:parseFloat(o.ap),ts:Date.now()});
+          if(val>250000&&o.s===state.symbol)
+            showAlert('💥 Liquidación grande en '+o.s.replace('USDT','')+': $'+fmtUsd(val)+' '+(o.S==='SELL'?'(longs liquidados — presión bajista)':'(shorts liquidados — presión alcista)'),o.S==='SELL'?'short':'long');
+        }
+        state.liqs=state.liqs.slice(0,80);
         renderLiqs();
       }catch(err){}
     };
-    ws.onclose=()=>setTimeout(connectLiqs,5000);
+    ws.onclose=()=>{state.liqWs='reconectando';renderLiqs();setTimeout(connectLiqs,5000);};
     ws.onerror=()=>{try{ws.close();}catch(err){}};
-  }catch(e){}}
+  }catch(e){state.liqWs='error';renderLiqs();}}
 function renderLiqs(){
   const box=el('liqs');if(!box)return;
-  const rel=state.liqs.filter(l=>l.val>20000).slice(0,8);
-  box.innerHTML=rel.length?rel.map(l=>{
-    const mins=Math.round((Date.now()-l.ts)/60000);
+  const now=Date.now();
+  const recent=state.liqs.filter(l=>now-l.ts<30*60000);
+  let longs=0,shorts=0;
+  for(const l of recent){if(l.side==='SELL')longs+=l.val;else shorts+=l.val;}
+  const st=state.liqWs==='ok'?'<span class="long">● Conectado</span>':state.liqWs==='reconectando'?'<span class="err">● Reconectando…</span>':state.liqWs==='error'?'<span class="err">● Error de conexión</span>':'<span class="neutral">● Conectando…</span>';
+  let html='<div style="display:flex;justify-content:space-between;font-size:.75rem;margin-bottom:8px"><span>'+st+'</span><span style="color:var(--muted)">'+state.liqs.length+' eventos en tus pares</span></div>';
+  html+='<div class="stat-grid" style="margin-bottom:8px">'+
+    '<div class="stat"><div class="lbl">Longs liquidados (30m)</div><div class="val" style="color:var(--red)">$'+fmtUsd(longs)+'</div></div>'+
+    '<div class="stat"><div class="lbl">Shorts liquidados (30m)</div><div class="val" style="color:var(--green)">$'+fmtUsd(shorts)+'</div></div></div>';
+  const rel=state.liqs.slice(0,8);
+  html+=rel.length?rel.map(l=>{
+    const mins=Math.round((now-l.ts)/60000);
     const isLong=l.side==='SELL';
-    return '<div class="plan-row"><span class="k"><b>'+l.sym.replace('USDT','')+'</b> '+(isLong?'<span class="short">longs liquidados ↓</span>':'<span class="long">shorts liquidados ↑</span>')+'</span>'+
-      '<span class="v" style="color:'+(isLong?'var(--red)':'var(--green)')+'">$'+(l.val/1000).toFixed(0)+'k <span style="color:var(--muted);font-weight:400">· hace '+mins+'m</span></span></div>';
-  }).join(''):'<span style="color:var(--muted);font-size:.85rem">Sin liquidaciones relevantes (&gt;$20k) recientes en tus pares. Una racha de liquidaciones del mismo lado suele anticipar un movimiento fuerte en la dirección contraria a los liquidados.</span>';}
+    return '<div class="plan-row"><span class="k"><b>'+l.sym.replace('USDT','')+'</b> '+(isLong?'<span class="short">longs ↓</span>':'<span class="long">shorts ↑</span>')+'</span>'+
+      '<span class="v" style="color:'+(isLong?'var(--red)':'var(--green)')+'">$'+fmtUsd(l.val)+' <span style="color:var(--muted);font-weight:400">· hace '+mins+'m</span></span></div>';
+  }).join(''):'<div style="color:var(--muted);font-size:.8rem">Aún sin liquidaciones en tus 5 pares. Es normal que pasen varios minutos sin eventos (Binance publica máx. 1 por segundo y solo la mayor de cada segundo). Si los contadores suben de un solo lado, se acerca un movimiento fuerte en la dirección contraria a los liquidados.</div>';
+  box.innerHTML=html;}
 
 /* ---------- noticias y F&G ---------- */
 const POS_W=['surge','rally','soar','jump','bullish','approval','adoption','record','high','gain','etf inflow','breakout','partnership','upgrade'];
