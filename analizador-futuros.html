@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Analizador Futuros — Binance</title>
-<!-- v3.1 -->
+<!-- v3.2 -->
 <style>
 :root{
   --bg:#0b0e14; --panel:#131722; --panel2:#1a2030; --border:#232a3b;
@@ -722,7 +722,13 @@ function copyPlan(){
   const p=state.plan&&state.plan.plan;if(!p)return;
   const cap=parseFloat(el('capital').value)||0,rp=parseFloat(el('riskPct').value)||1;
   const qty=cap>0?(cap*rp/100/p.risk).toFixed(6):'—';
-  const txt=state.symbol+' '+p.dir+'\nEntrada ideal (límite): '+fmtP(p.entry)+'\nStop Loss: '+fmtP(p.sl)+'\nTP1: '+fmtP(p.tp1)+'\nTP2: '+fmtP(p.tp2)+'\nCantidad sugerida: '+qty;
+  const lev=parseFloat(el('lev').value)||5;
+  const riskUSD=cap*rp/100;
+  const qn=p.risk>0?riskUSD/p.risk:0;
+  const pct=cap>0?(qn*p.entry/lev)/cap*100:0;
+  const x2=(p.dir==='LONG'?p.tp2-p.entry:p.entry-p.tp2)/p.risk;
+  const txt=state.symbol+' '+p.dir+'\nEntrada ideal (límite): '+fmtP(p.entry)+'\nStop Loss: '+fmtP(p.sl)+'\nTP1: '+fmtP(p.tp1)+'\nTP2: '+fmtP(p.tp2)+'\nCantidad sugerida: '+qty+
+    '\n— Binance ('+lev+'x) —\nMonto (barra): '+pct.toFixed(0)+'%\nSL en PnL: -'+riskUSD.toFixed(2)+' USDT\nTP en PnL (TP1): +'+riskUSD.toFixed(2)+' USDT\nTP en PnL (TP2): +'+(riskUSD*x2).toFixed(2)+' USDT';
   if(navigator.clipboard&&navigator.clipboard.writeText){
     navigator.clipboard.writeText(txt).then(()=>toast('📋 Niveles copiados — pégalos en Binance'));
   }else{
@@ -756,15 +762,39 @@ function renderPlan(bp,an){
     '<div class="plan-row"><span class="k">Rango diario esperado (ATR 1D)</span><span class="v">$'+fmtP(bp.atrD)+'</span></div>'+
     '<div class="plan-row"><span class="k">Rango del día ya usado</span><span class="v" style="color:'+(bp.dayUsed>85?'var(--red)':bp.dayUsed>60?'var(--yellow)':'var(--green)')+'">'+bp.dayUsed.toFixed(0)+'%</span></div>'+
     (bp.dayUsed>85?'<div style="font-size:.75rem;color:var(--red);padding-top:6px">⚠️ El día ya consumió su rango típico: los targets son menos probables hoy. Considera esperar la próxima sesión.</div>':'')+
-    '<div style="font-size:.75rem;color:var(--muted);padding-top:8px">🕐 Modo intradía: TP1 y TP2 están calculados dentro del rango diario esperado. Si TP1 no llega en 6–8 horas, cierra a breakeven o a mercado — no dejes el trade abierto de un día para otro.</div>';
+    '<div style="font-size:.75rem;color:var(--muted);padding-top:8px">🕐 Modo intradía: TP1 y TP2 están calculados dentro del rango diario esperado. Si TP1 no llega en 6–8 horas, cierra a breakeven o a mercado — no dejes el trade abierto de un día para otro.</div>'+
+    '<div id="planBinance"></div>';
   btns.innerHTML='<button class="btn primary" onclick="jTake()">✅ Tomé esta entrada</button><button class="btn" onclick="copyPlan()">📋 Copiar niveles</button>';
   renderCalc(p);}
+function renderBinanceBox(p){
+  const box=el('planBinance');if(!box)return;
+  if(!p){box.innerHTML='';return;}
+  const cap=parseFloat(el('capital').value)||0;
+  const rp=parseFloat(el('riskPct').value)||1;
+  const lev=parseFloat(el('lev').value)||5;
+  const riskUSD=cap*rp/100;
+  const qty=p.risk>0?riskUSD/p.risk:0;
+  const margin=qty*p.entry/lev;
+  const pct=cap>0?margin/cap*100:0;
+  const x2=(p.dir==='LONG'?p.tp2-p.entry:p.entry-p.tp2)/p.risk;
+  const pctWarn=pct>100?'<div class="err" style="margin-top:4px">⚠️ Supera el 100%: baja el riesgo o sube el apalancamiento.</div>':'';
+  box.innerHTML=
+    '<div style="margin-top:12px;padding:10px 12px;border:1px dashed rgba(240,185,11,.45);border-radius:10px;background:rgba(240,185,11,.04)">'+
+    '<div style="font-size:.78rem;color:var(--yellow);font-weight:700;margin-bottom:4px">📱 Para colocarlo en Binance (Limit + TP/SL en modo Avanzado → PnL)</div>'+
+    '<div class="plan-row"><span class="k">1. Precio (Limit)</span><span class="v">'+fmtP(p.entry)+'</span></div>'+
+    '<div class="plan-row"><span class="k">2. Monto (barra %) con '+lev+'x</span><span class="v" style="color:var(--yellow)">'+pct.toFixed(0)+'%</span></div>'+
+    '<div class="plan-row"><span class="k">3. Stop loss → PnL</span><span class="v" style="color:var(--red)">-'+riskUSD.toFixed(2)+' USDT</span></div>'+
+    '<div class="plan-row"><span class="k">4. Take profit → PnL (todo al TP1)</span><span class="v" style="color:var(--green)">+'+riskUSD.toFixed(2)+' USDT</span></div>'+
+    '<div class="plan-row"><span class="k">&nbsp;&nbsp;&nbsp;o Take profit → PnL (todo al TP2)</span><span class="v" style="color:var(--green)">+'+(riskUSD*x2).toFixed(2)+' USDT</span></div>'+
+    pctWarn+
+    '<div style="font-size:.72rem;color:var(--muted);margin-top:6px;line-height:1.5">Pon en "Capital" de la calculadora tu saldo <b>disponible</b> real de Binance y usa aquí el mismo apalancamiento que en la app: así el % de la barra queda exacto. Si vas a dejar la orden sola (ej. durmiendo), usa el TP del TP1: es el más probable y ya cubre tu riesgo. El del TP2 paga más pero se alcanza menos veces.</div>'+
+    '</div>';}
 function renderCalc(p){
   const cap=parseFloat(el('capital').value)||0;
   const rp=parseFloat(el('riskPct').value)||1;
   const lev=parseFloat(el('lev').value)||10;
   const b=el('calcBody');
-  if(!p){b.innerHTML='<div style="color:var(--muted);font-size:.85rem">Se activará cuando haya un plan con sesgo definido.</div>';return;}
+  if(!p){b.innerHTML='<div style="color:var(--muted);font-size:.85rem">Se activará cuando haya un plan con sesgo definido.</div>';renderBinanceBox(null);return;}
   const riskUSD=cap*rp/100;
   const qty=riskUSD/p.risk;
   const notional=qty*p.entry;
@@ -783,7 +813,8 @@ function renderCalc(p){
     '<div class="plan-row"><span class="k">💵 Ganancia en TP1 (cierras 50%)</span><span class="v" style="color:var(--green)">+$'+g1.toFixed(2)+'</span></div>'+
     '<div class="plan-row"><span class="k">💵 Ganancia total (TP1 + TP2)</span><span class="v" style="color:var(--green)">+$'+gTot.toFixed(2)+'</span></div>'+
     '<div style="font-size:.72rem;color:var(--muted);padding-top:6px">Al tocar TP1 aseguras +$'+g1.toFixed(2)+' y mueves el SL a tu entrada: desde ahí el trade ya no puede perder.</div>'+
-    liqWarn+rpWarn;}
+    liqWarn+rpWarn;
+  renderBinanceBox(p);}
 function renderTFTable(an){
   const tb=el('tfTable').querySelector('tbody');
   tb.innerHTML=TFS.map(tf=>{
